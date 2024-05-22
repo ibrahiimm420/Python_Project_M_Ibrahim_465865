@@ -1,0 +1,161 @@
+import feedparser
+import string
+import time
+import threading
+from mtTkinter import *
+from datetime import datetime
+import pytz
+
+class NewsStory:
+    def __init__(self, guid, title, description, link, pubdate):
+        self.guid, self.title, self.description, self.link, self.pubdate = guid, title, description, link, pubdate
+
+    def get_guid(self):
+        return self.guid
+
+    def get_title(self):
+        return self.title
+
+    def get_description(self):
+        return self.description
+
+    def get_link(self):
+        return self.link
+
+    def get_pubdate(self):
+        return self.pubdate
+
+class Trigger:
+    def evaluate(self, story):
+        raise NotImplementedError
+
+class PhraseTrigger(Trigger):
+    def __init__(self, phrase):
+        self.phrase = phrase.lower()
+
+    def is_phrase_in(self, text):
+        text = ''.join([c if c not in string.punctuation else ' ' for c in text.lower()])
+        return f' {self.phrase} ' in f' {text} '
+
+    def evaluate(self, story):
+        raise NotImplementedError
+
+class TitleTrigger(PhraseTrigger):
+    def evaluate(self, story):
+        return self.is_phrase_in(story.get_title())
+
+class DescriptionTrigger(PhraseTrigger):
+    def evaluate(self, story):
+        return self.is_phrase_in(story.get_description())
+
+class TimeTrigger(Trigger):
+    def __init__(self, time_string):
+        self.time = datetime.strptime(time_string, "%d %b %Y %H:%M:%S").replace(tzinfo=pytz.utc).astimezone(pytz.timezone("US/Eastern"))
+
+class BeforeTrigger(TimeTrigger):
+    def evaluate(self, story):
+        return story.get_pubdate() < self.time
+
+class AfterTrigger(TimeTrigger):
+    def evaluate(self, story):
+        return story.get_pubdate() > self.time
+
+class NotTrigger(Trigger):
+    def __init__(self, trigger):
+        self.trigger = trigger
+
+    def evaluate(self, story):
+        return not self.trigger.evaluate(story)
+
+class AndTrigger(Trigger):
+    def __init__(self, trigger1, trigger2):
+        self.trigger1, self.trigger2 = trigger1, trigger2
+
+    def evaluate(self, story):
+        return self.trigger1.evaluate(story) and self.trigger2.evaluate(story)
+
+class OrTrigger(Trigger):
+    def __init__(self, trigger1, trigger2):
+        self.trigger1, self.trigger2 = trigger1, trigger2
+
+    def evaluate(self, story):
+        return self.trigger1.evaluate(story) or self.trigger2.evaluate(story)
+
+def process(url):
+    feed = feedparser.parse(url)
+    entries = feed.entries
+    ret = []
+    for entry in entries:
+        guid, title, link = entry.get('guid', ''), entry.get('title', ''), entry.get('link', '')
+        description = entry.get('description', '')
+        pubdate_str = entry.get('published', '')
+        pubdate = datetime.strptime(pubdate_str, "%a, %d %b %Y %H:%M:%S %Z").replace(tzinfo=pytz.utc).astimezone(pytz.timezone("US/Eastern"))
+        ret.append(NewsStory(guid, title, description, link, pubdate))
+    return ret
+
+def filter_stories(stories, triggerlist):
+    return [story for story in stories if any(trigger.evaluate(story) for trigger in triggerlist)]
+
+def read_trigger_config(triggers):
+    trigger_file = open(triggers, 'r')
+    triggers = {}
+    trigger_list = []
+    for line in trigger_file:
+        line = line.strip()
+        if line and not line.startswith('//'):
+            parts = line.split(',')
+            if parts[0] == 'ADD':
+                trigger_list.extend(triggers[name] for name in parts[1:] if name in triggers)
+            else:
+                trigger_name, trigger_type, trigger_args = parts[0].strip(), parts[1].strip(), [arg.strip() for arg in parts[2:]]
+                trigger = eval(f"{trigger_type}Trigger(*trigger_args)")
+                triggers[trigger_name] = trigger
+    return trigger_list
+
+SLEEPTIME = 120
+
+def main_thread(master):
+    try:
+        frame = Frame(master)
+        frame.pack(side=BOTTOM)
+        scrollbar = Scrollbar(master)
+        scrollbar.pack(side=RIGHT, fill=Y)
+        title = StringVar()
+        title.set("Google & Yahoo Top News")
+        ttl = Label(master, textvariable=title, font=("Helvetica", 18))
+        ttl.pack(side=TOP)
+        cont = Text(master, font=("Helvetica", 14), yscrollcommand=scrollbar.set)
+        cont.pack(side=BOTTOM)
+        cont.tag_config("title", justify='center')
+        button = Button(frame, text="Exit", command=root.destroy)
+        button.pack(side=BOTTOM)
+        guidShown = set()
+
+        def get_cont(newstory):
+            if newstory.get_guid() not in guidShown:
+                cont.insert(END, newstory.get_title() + "\n", "title")
+                cont.insert(END, "\n---------------------------------------------------------------\n", "title")
+                cont.insert(END, newstory.get_description())
+                cont.insert(END, "\n*************************\n", "title")
+                guidShown.add(newstory.get_guid())
+
+        while True:
+            print("Polling . . .", end=' ')
+            stories = process("http://news.google.com/news?output=rss")
+            stories.extend(process("http://news.yahoo.com/rss/topstories"))
+            triggerlist = read_trigger_config('triggers.txt')
+            stories = filter_stories(stories, triggerlist)
+            list(map(get_cont, stories))
+            scrollbar.config(command=cont.yview)
+            print("Sleeping...")
+            time.sleep(SLEEPTIME)
+
+    except Exception as e:
+        print(e)
+
+if __name__ == '__main__':
+    root = Tk()
+    root.title("Some RSS parser")
+    t = threading.Thread(target=main_thread, args=(root,))
+    t.start()
+    root.mainloop()
